@@ -1,0 +1,36 @@
+# llama-cpp node family as a standalone Path 3 cdylib plugin.
+#
+# Provides four streaming nodes that wrap the llama.cpp C library
+# through safe Rust bindings via the `llama-cpp-4` crate:
+#
+#   LlamaCppGenerationNode  — chat / completion w/ token streaming + tool calls
+#   LlamaCppEmbeddingNode   — text → dense vector embeddings
+#   LlamaCppActivationNode  — capture hidden-state activations at arbitrary layers
+#   LlamaCppSteerNode       — inject activation deltas (emotion steering, DoG)
+#
+# Originally lived in `remotemedia-core` behind the `llama-cpp` feature.
+# Extracted so the host crate doesn't drag in llama-cpp-sys-4 (~200 MiB
+# CUDA-linked C build) just for this node family.
+#
+# Consumer manifest reference:
+#
+#   "plugins": ["llama-cpp@v0.1.0"]
+#       (canonical-org shorthand → github.com/RemoteMedia-SDK/llama-cpp)
+#
+#   "plugins": ["./plugins/libllama_cpp_plugin.so"]
+#       (local path)
+
+[plugin]
+name        = "llama-cpp"
+version     = "0.1.0"
+language    = "rust"
+description = "llama.cpp GGUF inference nodes (generation, embedding, activation extraction, steering) — RemoteMedia SDK Path 3 loadable plugin"
+
+[rust]
+node_types    = [
+    "LlamaCppGenerationNode",
+    "LlamaCppEmbeddingNode",
+    "LlamaCppActivationNode",
+    "LlamaCppSteerNode",
+]
+asset_pattern = "lib{name}-{arch}-{os}.{ext}"
