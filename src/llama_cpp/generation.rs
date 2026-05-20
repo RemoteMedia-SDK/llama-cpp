@@ -823,7 +823,16 @@ impl ToolCallStripper {
                     let inner = self.buffer[..idx].trim().to_string();
                     self.buffer.drain(..idx + Self::CLOSE.len());
                     self.in_call = false;
-                    self.parse_inner(&inner);
+                    // If `parse_inner` can't parse the body as a JSON
+                    // tool call, it returns the raw text so we can
+                    // re-emit it on the regular text channel. Without
+                    // this, models that emit malformed tool-call
+                    // wrappers (Llama-3-style `<function=…>` inside a
+                    // Qwen `<tool_call>` envelope, etc.) get their
+                    // entire reply silently dropped.
+                    if let Some(raw) = self.parse_inner(&inner) {
+                        out.push_str(&raw);
+                    }
                     continue;
                 }
                 break;
@@ -866,16 +875,24 @@ impl ToolCallStripper {
         Some(std::mem::take(&mut self.buffer))
     }
 
-    fn parse_inner(&mut self, inner: &str) {
+    /// Returns `Some(raw_text)` when the body can't be turned into a
+    /// dispatchable tool call. The caller re-emits that text on the
+    /// regular text channel — losing the call (no tool can dispatch
+    /// it) but preserving whatever the model intended to say.
+    ///
+    /// Returns `None` when the body parsed cleanly and was appended to
+    /// `self.calls`.
+    fn parse_inner(&mut self, inner: &str) -> Option<String> {
         let v: serde_json::Value = match serde_json::from_str(inner) {
             Ok(v) => v,
             Err(e) => {
                 tracing::warn!(
                     error = %e,
                     raw = %inner,
-                    "[llm] llama.cpp <tool_call> body did not parse as JSON; dropping"
+                    "[llm] llama.cpp <tool_call> body did not parse as JSON; \
+                     re-emitting as plain text"
                 );
-                return;
+                return Some(inner.to_string());
             }
         };
         let name = v
@@ -886,9 +903,10 @@ impl ToolCallStripper {
         if name.is_empty() {
             tracing::warn!(
                 raw = %inner,
-                "[llm] llama.cpp <tool_call> body had no `name` field; dropping"
+                "[llm] llama.cpp <tool_call> body had no `name` field; \
+                 re-emitting as plain text"
             );
-            return;
+            return Some(inner.to_string());
         }
         let arguments_json = match v.get("arguments") {
             Some(serde_json::Value::String(s)) => s.clone(),
@@ -899,6 +917,7 @@ impl ToolCallStripper {
             name,
             arguments_json,
         });
+        None
     }
 
     fn take_calls(&mut self) -> Vec<ParsedToolCall> {
