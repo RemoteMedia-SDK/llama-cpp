@@ -1,6 +1,6 @@
 [package]
 name = "llama-cpp-plugin"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 publish = false
 
@@ -25,7 +25,16 @@ incremental = true
 
 [lib]
 name = "llama_cpp_plugin"
-crate-type = ["cdylib"]
+# cdylib: matrix-built `.so` for dlopen. rlib: in-process linking
+# for consumers like examples/qwen-s2s-avatar-plugins.
+crate-type = ["cdylib", "rlib"]
+
+# `plugin-export` (default on) gates the `abi_stable` root-module
+# symbol for dlopen. Disable when linking multiple plugins as rlibs
+# in one binary (symbol collision).
+[features]
+default = ["plugin-export"]
+plugin-export = []
 
 # Path-3 hand-rolled plugin: depends ONLY on the skinny
 # `remotemedia-plugin-sdk` umbrella plus the heavy llama-cpp /
@@ -43,12 +52,16 @@ bytemuck = { version = "1.14", features = ["derive"] }
 tokio = { version = "1", features = ["sync", "rt-multi-thread", "macros", "time"] }
 tracing = "0.1"
 
-# Match the host workspace pin (=0.2.13) for behavioural parity. The
-# CUDA execution backend is always on for the plugin — consumers
-# building on machines without the CUDA toolkit will need to either
-# disable `cuda` here or have CUDA available at link time (see README).
-llama-cpp-4 = { version = "0.2.13", features = ["cuda"] }
-llama-cpp-sys-4 = { version = "0.2", features = ["cuda"] }
+# Pinned ahead of the host workspace (host is at =0.2.13) to pull in
+# Qwen3.6 MTP (multi-token prediction) support. MTP was upstreamed into
+# llama.cpp in llama-cpp-rs v0.2.56 (PR ggml-org/llama.cpp#22673) and
+# the API was finalized in v0.3.0 (`MtpSession`, `LlamaContextType::Mtp`,
+# `LlamaContextParams::with_ctx_type`). The CUDA execution backend is
+# always on for the plugin — consumers building on machines without the
+# CUDA toolkit will need to either disable `cuda` here or have CUDA
+# available at link time (see README).
+llama-cpp-4 = { version = "0.3.0", features = ["cuda"] }
+llama-cpp-sys-4 = { version = "0.3", features = ["cuda"] }
 encoding_rs = "0.8"
 minijinja = { version = "2", default-features = false, features = [
     "builtins",

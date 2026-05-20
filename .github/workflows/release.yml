@@ -1,20 +1,48 @@
-name: Release
+# Release workflow — DISABLED for this plugin.
+#
+# The standard RemoteMedia-SDK reusable workflow (`build-plugin.yml`) builds
+# on `ubuntu-latest` / `macos-latest` / `windows-latest`. None of those
+# runners ship with the CUDA toolkit, but `llama-cpp-sys-4` builds with
+# `features = ["cuda"]` here and links ~180 CUDA kernels at compile time.
+# Even if we made CUDA optional, the plugin ships a dynamic-linked
+# layout (cdylib + ~8 companion `libggml-*.so.0` libraries) that the
+# reusable workflow's single-binary upload contract can't represent.
+#
+# Releases for this plugin are cut **locally** on a CUDA-equipped host
+# via `scripts/release-local.sh` (see README "Releasing a new version").
+#
+# This workflow is kept as a tripwire: if someone pushes a `v*` tag
+# expecting CI to pick it up, the job fails loudly with a pointer to
+# the local-release script instead of silently producing nothing.
+
+name: Release (disabled — release locally)
 
 on:
   push:
     tags: ['v*']
   workflow_dispatch:
-    inputs:
-      tag:
-        description: 'Tag to release (e.g. v0.1.0)'
-        required: true
 
 jobs:
-  release:
-    uses: RemoteMedia-SDK/remotemedia-sdk/.github/workflows/build-plugin.yml@main
-    with:
-      crate-name:   llama-cpp-plugin
-      display-name: llama-cpp
-      tag:          ${{ inputs.tag || github.ref_name }}
-    permissions:
-      contents: write
+  fail-with-pointer:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Explain why CI release is disabled
+        run: |
+          cat <<'EOF' >&2
+          ============================================================
+          Release via GitHub Actions is disabled for the llama-cpp
+          plugin because the runners don't have CUDA and the plugin
+          needs a custom multi-binary upload (cdylib + companion
+          libggml-*.so.0 files).
+
+          To cut a release:
+
+              git tag vX.Y.Z
+              scripts/release-local.sh vX.Y.Z
+              # script builds, bundles, generates release-manifest.json,
+              # pushes the tag, and runs `gh release create`.
+
+          See README.md "Releasing a new version" for details.
+          ============================================================
+          EOF
+          exit 1

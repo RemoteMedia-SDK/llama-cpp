@@ -57,7 +57,7 @@ a current NVIDIA driver.
 ```json
 {
   "version": "v1",
-  "plugins": ["llama-cpp@v0.1.0"],
+  "plugins": ["llama-cpp@v0.2.0"],
   "nodes": [
     {
       "id": "llm",
@@ -75,7 +75,7 @@ a current NVIDIA driver.
 }
 ```
 
-The SDK resolver expands `llama-cpp@v0.1.0` to
+The SDK resolver expands `llama-cpp@v0.2.0` to
 `github.com/RemoteMedia-SDK/llama-cpp`, fetches `plugin.toml`, then
 falls through to `release-manifest.json` for the platform-specific
 prebuilt `.so` / `.dylib` / `.dll` asset.
@@ -91,6 +91,58 @@ cargo build --release
 
 First build takes 5–10 minutes because `llama-cpp-sys-4` compiles
 several hundred MB of C/C++ + CUDA kernels.
+
+## Releasing a new version
+
+**GitHub Actions cannot cut releases for this plugin.** The standard
+`build-plugin.yml` reusable workflow runs on `ubuntu-latest` /
+`macos-latest` / `windows-latest`, none of which ship the CUDA
+toolkit. Even with CUDA available, the dynamic-linked layout
+(cdylib + ~8 companion `libggml-*.so.0` libraries) doesn't fit the
+upstream workflow's single-binary upload contract. The tag-triggered
+`.github/workflows/release.yml` is intentionally a tripwire that
+fails with a pointer to this section.
+
+Releases are cut **locally** on a CUDA-equipped host via the helper
+script:
+
+```bash
+# 1. Bump the version
+$EDITOR plugin.toml Cargo.toml   # version = "0.X.Y" in both
+cargo update -p llama-cpp-plugin
+git commit -am "release: v0.X.Y"
+
+# 2. Tag and run the script
+git tag v0.X.Y
+scripts/release-local.sh v0.X.Y                  # builds + uploads
+scripts/release-local.sh v0.X.Y --dry-run        # builds + stages locally, no upload
+scripts/release-local.sh v0.X.Y --platform aarch64-linux   # other platforms
+```
+
+The script:
+
+1. Verifies the tag matches `plugin.toml` / `Cargo.toml`.
+2. Runs `cargo build --release`.
+3. Locates the SONAME-versioned companion libraries
+   (`libllama.so.0`, `libggml-{base,cpu,cuda,blas}.so.0`,
+   `libllama-common.so.0`, `libmtmd.so.0`) in
+   `target/llama-cmake-cache/<hash>/lib/`.
+4. Stages them into a tarball named
+   `lib{plugin}-{platform}-companions.tar.gz`.
+5. Renames the cdylib to `lib{plugin}-{platform}.{ext}` per the
+   resolver's `current_platform()` lookup.
+6. SHA256-hashes both, writes `.sha256` sidecars.
+7. Generates `release-manifest.json` with `file`, `sha256`,
+   `companions`, `companions_sha256` keys per platform. Multi-platform
+   releases accrete by re-running the script against the same tag on
+   each host — the script downloads the existing manifest and merges
+   the new platform entry.
+8. Pushes the tag and runs `gh release create` (or
+   `gh release upload --clobber` if the release already exists).
+
+Consumers fetch the cdylib from the manifest's `file` entry and the
+companion tarball from `companions`, extract the tarball next to the
+cdylib (or anywhere on `LD_LIBRARY_PATH`), and dlopen the cdylib.
 
 ## What it exports
 
@@ -118,6 +170,35 @@ several hundred MB of C/C++ + CUDA kernels.
   rendered via [minijinja](https://crates.io/crates/minijinja) with
   `tools`, `tool_choice`, and `enable_thinking=false` kwargs so
   Qwen3-style templates produce the `# Tools` system block.
+
+### Multi-Token Prediction (Qwen3.6 MTP)
+
+Since `v0.2.0` the plugin links `llama-cpp-4` v0.3.0, which carries the
+upstream MTP support merged in
+[ggml-org/llama.cpp#22673](https://github.com/ggml-org/llama.cpp/pull/22673).
+Loading a Qwen3.6 MTP GGUF (e.g. `Qwen3.6-27B-Q4_K_M-mtp.gguf`,
+`Qwen3.6-27B-IQ2_M-mtp.gguf`) works out of the box — the MTP head is
+autodetected from GGUF metadata.
+
+What you get today:
+
+- **Drop-in load** of MTP-flavored Qwen3.6 GGUFs through
+  `LlamaCppGenerationNode` / `LlamaCppEmbeddingNode` /
+  `LlamaCppActivationNode`. Normal next-token generation runs against
+  the base head; the MTP head is simply present in the file.
+
+What is **not yet wired** through the plugin params:
+
+- `LlamaContextType::Mtp` / `LlamaContextParams::with_ctx_type` for
+  speculative-decoding draft contexts.
+- The `llama_cpp_4::mtp::MtpSession` draft loop (would need a new
+  `mtp: { enabled: true, n_max: 1, n_min: 0, p_min: 0.0 }` block on
+  `LlamaCppGenerationNode` params and a second model handle).
+
+Speculative-decoding throughput gains (≈+6–10% on Qwen3.6-27B per
+upstream benchmarks) therefore require either (a) using the
+`llama-cpp-4` API directly until the plugin exposes those params or
+(b) opening an issue for the MTP draft-loop wiring.
 
 ### Embedding
 

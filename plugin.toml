@@ -22,9 +22,9 @@
 
 [plugin]
 name        = "llama-cpp"
-version     = "0.1.0"
+version     = "0.2.0"
 language    = "rust"
-description = "llama.cpp GGUF inference nodes (generation, embedding, activation extraction, steering) — RemoteMedia SDK Path 3 loadable plugin"
+description = "llama.cpp GGUF inference nodes (generation, embedding, activation extraction, steering) — RemoteMedia SDK Path 3 loadable plugin. v0.2.0 bumps llama-cpp-4 0.2.13 → 0.3.0 for Qwen3.6 MTP support."
 
 [rust]
 node_types    = [
