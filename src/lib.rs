@@ -179,6 +179,10 @@ impl FfiNodeFactory for LlamaCppSteerNodeFactory {
 // Plugin registration
 // ---------------------------------------------------------------------------
 
+// Emits the abi_stable root-module symbol for dlopen. Gated behind
+// the `plugin-export` cargo feature so the rlib can be linked
+// alongside other plugins without duplicate-symbol collisions.
+#[cfg(feature = "plugin-export")]
 remotemedia_plugin_sdk::plugin_export!(
     LlamaCppGenerationNodeFactory,
     LlamaCppEmbeddingNodeFactory,
