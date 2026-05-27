@@ -34,6 +34,8 @@
 //!   relies on the universal future-drop cancellation pathway.
 
 use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::collections::HashMap;
 
 use remotemedia_plugin_sdk::types::{ControlMessageType, Error, RuntimeData, TEXT_CHANNEL_DEFAULT};
 use serde_json::Value;
@@ -42,6 +44,7 @@ use tracing::{debug, error, info, warn};
 
 use remotemedia_plugin_sdk::traits::runtime_context::InitializeContextRead;
 use remotemedia_plugin_sdk::traits::streaming::AsyncStreamingNode;
+use remotemedia_plugin_sdk::traits::{InterruptableBackend, StatefulConversationBackend};
 
 use super::config::LlamaCppGenerationConfig;
 use crate::tool_spec::{default_say_tool, default_show_tool, ToolSpec};
@@ -92,6 +95,7 @@ enum WorkerRequest {
         tools_json: Option<Value>,
         tool_choice: Option<Value>,
         event_tx: mpsc::Sender<TurnEvent>,
+        cancel_flag: Arc<AtomicBool>,
     },
     #[allow(dead_code)]
     ResetSession {
@@ -104,6 +108,8 @@ enum WorkerRequest {
 pub struct LlamaCppGenerationNode {
     config: LlamaCppGenerationConfig,
     worker_tx: OnceLock<mpsc::Sender<WorkerRequest>>,
+    sessions: Arc<Mutex<HashMap<String, Arc<Mutex<ChatState>>>>>,
+    interrupts: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
 }
 
 impl LlamaCppGenerationNode {
@@ -115,6 +121,8 @@ impl LlamaCppGenerationNode {
         Ok(Self {
             config: config.clone(),
             worker_tx: OnceLock::new(),
+            sessions: Arc::new(Mutex::new(HashMap::new())),
+            interrupts: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
@@ -131,6 +139,7 @@ impl LlamaCppGenerationNode {
         prompt: &str,
         tools_json: Option<Value>,
         tool_choice: Option<Value>,
+        cancel_flag: Arc<AtomicBool>,
     ) -> Result<mpsc::Receiver<TurnEvent>, Error> {
         let tx = self.worker_tx.get().ok_or_else(|| {
             Error::Execution(
@@ -148,6 +157,7 @@ impl LlamaCppGenerationNode {
             tools_json,
             tool_choice,
             event_tx,
+            cancel_flag,
         })
         .await
         .map_err(|_| Error::Execution("LlamaCpp worker thread is gone".into()))?;
@@ -258,8 +268,9 @@ impl AsyncStreamingNode for LlamaCppGenerationNode {
         let chat = Arc::new(Mutex::new(self.fresh_chat_state()));
         let tools_json = self.resolved_tools_json();
         let tool_choice = self.config.tool_choice.clone();
+        let cancel_flag = Arc::new(AtomicBool::new(false));
         let mut events = self
-            .generate_for_session("__inner_oneshot__", chat, &prompt, tools_json, tool_choice)
+            .generate_for_session("__inner_oneshot__", chat, &prompt, tools_json, tool_choice, cancel_flag)
             .await?;
         let mut joined = String::new();
         while let Some(event) = events.recv().await {
@@ -297,19 +308,36 @@ impl AsyncStreamingNode for LlamaCppGenerationNode {
             }
         };
 
-        // Plugin-side: fresh per-call ChatState. The host's
-        // per-session typed state mechanism isn't reachable from the
-        // FFI surface — see the module-level note.
-        let chat = Arc::new(Mutex::new(self.fresh_chat_state()));
+        // Persistent session: look up or create ChatState from the sessions map.
+        let session_key = session_id.as_deref().unwrap_or("__inner_oneshot__");
+        let chat = {
+            let mut sessions = self.sessions.lock().unwrap();
+            sessions.entry(session_key.to_string())
+                .or_insert_with(|| Arc::new(Mutex::new(self.fresh_chat_state())))
+                .clone()
+        };
+
+        // Reset interrupt flag and get cancel latch for this turn.
+        let cancel_flag = {
+            let mut interrupts = self.interrupts.lock().unwrap();
+            let flag = interrupts.entry(session_key.to_string())
+                .or_insert_with(|| Arc::new(AtomicBool::new(false)));
+            flag.store(false, Ordering::Relaxed);
+            flag.clone()
+        };
+
+        let turn_started = std::time::Instant::now();
+
         let tools_json = self.resolved_tools_json();
         let tool_choice = self.config.tool_choice.clone();
         let events = self
             .generate_for_session(
-                session_id.as_deref().unwrap_or("__inner_oneshot__"),
-                chat,
+                session_key,
+                chat.clone(),
                 &prompt,
                 tools_json,
                 tool_choice,
+                cancel_flag.clone(),
             )
             .await?;
         let registry = self.build_tool_registry();
@@ -320,6 +348,21 @@ impl AsyncStreamingNode for LlamaCppGenerationNode {
             &mut callback,
         )
         .await?;
+
+        // Handle early-interrupt history rollback inline.
+        let interrupted = cancel_flag.load(Ordering::Relaxed);
+        let elapsed = turn_started.elapsed().as_secs_f32();
+        if interrupted && elapsed < 3.0 {
+            if let Some(chat_entry) = self.sessions.lock().unwrap().get(session_key) {
+                let mut guard = chat_entry.lock().unwrap();
+                if guard.messages.len() >= 2 {
+                    guard.messages.pop(); // incomplete assistant reply
+                    if guard.messages.last().map(|m| m.role == "user").unwrap_or(false) {
+                        guard.messages.pop(); // user prompt that triggered it
+                    }
+                }
+            }
+        }
 
         Ok(count)
     }
@@ -471,6 +514,7 @@ fn worker_main(
                 tools_json,
                 tool_choice,
                 event_tx,
+                cancel_flag,
             } => {
                 let t0 = Instant::now();
                 let mut chat_guard = match chat.lock() {
@@ -500,6 +544,7 @@ fn worker_main(
                     tool_choice.as_ref(),
                     tap_capture.as_mut(),
                     &event_tx,
+                    cancel_flag.clone(),
                 );
                 match &result {
                     Ok(stats) => {
@@ -1035,6 +1080,7 @@ fn run_turn_incremental(
     tool_choice: Option<&serde_json::Value>,
     mut tap_capture: Option<&mut llama_cpp_4::context::tensor_capture::TensorCapture>,
     event_tx: &mpsc::Sender<TurnEvent>,
+    cancel_flag: Arc<AtomicBool>,
 ) -> Result<TurnStats, Error> {
     use llama_cpp_4::llama_batch::LlamaBatch;
     use llama_cpp_4::model::{AddBos, Special};
@@ -1159,6 +1205,10 @@ fn run_turn_incremental(
 
     let mut response_token_idx: u32 = 0;
     for _ in 0..config.max_tokens {
+        if cancel_flag.load(Ordering::Relaxed) {
+            tracing::info!("Generation turn cancelled mid-flight!");
+            break;
+        }
         let token = sampler.sample(ctx, batch.n_tokens() - 1);
         if model.is_eog_token(token) {
             break;
@@ -1262,4 +1312,70 @@ fn snapshot_last_token_hidden(
         token_index,
         turn_offset_ms: turn_started.elapsed().as_millis() as u64,
     })
+}
+
+#[async_trait::async_trait]
+impl InterruptableBackend for LlamaCppGenerationNode {
+    async fn request_cancel(&self, session_id: &str) -> Result<(), Error> {
+        let mut interrupts = self.interrupts.lock().unwrap();
+        let flag = interrupts
+            .entry(session_id.to_string())
+            .or_insert_with(|| Arc::new(AtomicBool::new(false)));
+        flag.store(true, Ordering::Relaxed);
+        Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl StatefulConversationBackend for LlamaCppGenerationNode {
+    async fn reset_history(&self, session_id: &str) -> Result<(), Error> {
+        let sessions = self.sessions.lock().unwrap();
+        if let Some(chat) = sessions.get(session_id) {
+            let mut guard = chat.lock().unwrap();
+            guard.messages.clear();
+        }
+        Ok(())
+    }
+
+    async fn set_context(&self, session_id: &str, context: &str) -> Result<(), Error> {
+        let mut sessions = self.sessions.lock().unwrap();
+        let chat = sessions
+            .entry(session_id.to_string())
+            .or_insert_with(|| Arc::new(Mutex::new(ChatState::new())));
+        let mut guard = chat.lock().unwrap();
+        if guard.messages.is_empty() {
+            guard.messages.push(ChatMsg {
+                role: "system".into(),
+                content: context.into(),
+            });
+        } else if guard.messages[0].role == "system" {
+            guard.messages[0].content = format!(
+                "{}\nContext: {}",
+                self.config.system_prompt.as_deref().unwrap_or(""),
+                context
+            );
+        }
+        Ok(())
+    }
+
+    async fn finalize_turn(
+        &self,
+        session_id: &str,
+        interrupted: bool,
+        elapsed_secs: f32,
+    ) -> Result<(), Error> {
+        if interrupted && elapsed_secs < 3.0 {
+            let sessions = self.sessions.lock().unwrap();
+            if let Some(chat) = sessions.get(session_id) {
+                let mut guard = chat.lock().unwrap();
+                if guard.messages.len() >= 2 {
+                    guard.messages.pop();
+                    if guard.messages.last().map(|m| m.role == "user").unwrap_or(false) {
+                        guard.messages.pop();
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
 }
