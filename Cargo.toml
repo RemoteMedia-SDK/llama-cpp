@@ -40,7 +40,7 @@ plugin-export = []
 # `remotemedia-plugin-sdk` umbrella plus the heavy llama-cpp /
 # minijinja stack pinned directly. Does NOT link `remotemedia-core`.
 [dependencies]
-remotemedia-plugin-sdk = { git = "https://github.com/RemoteMedia-SDK/remotemedia-sdk.git", rev = "5dd1bc9980eafa51bac188279bb0d29a2bdaba34" }
+remotemedia-plugin-sdk = { git = "https://github.com/RemoteMedia-SDK/remotemedia-plugin-sdk" }
 abi_stable = "0.11"
 
 async-trait = "0.1"
@@ -73,7 +73,7 @@ minijinja = { version = "2", default-features = false, features = [
 ] }
 minijinja-contrib = { version = "2", default-features = false, features = ["pycompat"] }
 
-[patch."https://github.com/RemoteMedia-SDK/remotemedia-sdk.git"]
+[patch."ssh://git@github.com/RemoteMedia-SDK/remotemedia-sdk.git"]
 remotemedia-plugin-sdk = { path = "../remotemedia-plugin-sdk/crates/plugin-sdk" }
 remotemedia-traits = { path = "../remotemedia-plugin-sdk/crates/traits" }
 remotemedia-types = { path = "../remotemedia-plugin-sdk/crates/types" }
