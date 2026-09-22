@@ -137,6 +137,16 @@ where
                 );
             }
         }
+        "get_scene_state" | "perform_action" | "cancel_action" | "edit_motion_timeline" => {
+            let Some(mut envelope) = args.as_object().cloned() else {
+                return Err(Error::Execution("office tool arguments must be an object".into()));
+            };
+            envelope.insert("kind".into(), Value::String(call.name.clone()));
+            if call.name == "get_scene_state" {
+                envelope.insert("request_id".into(), Value::String(call.id.clone()));
+            }
+            callback(RuntimeData::Json(Value::Object(envelope)))?;
+        }
         other => {
             tracing::debug!(
                 tool = %other,
@@ -146,4 +156,22 @@ where
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod office_tests {
+    use super::*;
+    #[test]
+    fn office_dispatch_uses_registered_name_and_preserves_action_identity() {
+        let registry: Vec<ToolSpec> = serde_json::from_value(serde_json::json!([{
+            "name":"perform_action", "description":"Office action", "kind":"side_effect", "parameters":{"type":"object"}
+        }])).unwrap();
+        let call = ToolCallAccum { id:"call-1".into(), name:"perform_action".into(),
+            arguments:r#"{"kind":"incorrect","action_id":"walk-1","verb":"walk","target":"desk"}"#.into() };
+        let mut out = vec![];
+        dispatch_tool_call(&registry, &call, "text", &mut |v| { out.push(v); Ok(()) }).unwrap();
+        let RuntimeData::Json(v) = &out[0] else { panic!("expected action envelope") };
+        assert_eq!(v["kind"], "perform_action");
+        assert_eq!(v["action_id"], "walk-1");
+    }
 }
